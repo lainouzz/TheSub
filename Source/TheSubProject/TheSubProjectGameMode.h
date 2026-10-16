@@ -13,6 +13,13 @@ class ATheSubProjectGameMode : public AGameModeBase
 
 public:
 	ATheSubProjectGameMode();
+
+	/** Spawns the player inside the level's submarine if there is one, otherwise at a PlayerStart */
+	virtual void RestartPlayer(AController* NewPlayer) override;
+
+private:
+	/** Which spawn slot inside the submarine the next player gets */
+	int32 NextSpawnSlot = 0;
 };
 
 
