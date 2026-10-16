@@ -10,6 +10,10 @@ class UBoxComponent;
 class UStaticMeshComponent;
 class UPointLightComponent;
 class UArrowComponent;
+class ASubStation;
+class ALeak;
+
+THESUBPROJECT_API DECLARE_LOG_CATEGORY_EXTERN(LogSubmarine, Log, All);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSubmarineImpact, float, ImpactSpeed, const FHitResult&, Hit);
 
@@ -111,6 +115,18 @@ class THESUBPROJECT_API ASubmarine : public AActor
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
 	USceneComponent* PlayerSpawnPoint;
 
+	/** Where the helm console is spawned (helm room, against the bow wall) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
+	USceneComponent* HelmStationPoint;
+
+	/** Where the sonar console is spawned (middle room, against the port wall) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
+	USceneComponent* SonarStationPoint;
+
+	/** Water surface inside the sub; sits at WaterLevel above the floor, hidden when dry */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
+	UStaticMeshComponent* WaterSurface;
+
 	/** Shows which way is forward in the editor */
 	UPROPERTY(VisibleAnywhere, Category=Submarine, meta=(AllowPrivateAccess = "true"))
 	UArrowComponent* ForwardArrow;
@@ -141,6 +157,72 @@ public:
 	UFUNCTION(BlueprintPure, Category="Submarine")
 	float GetCurrentSpeed() const { return CurrentSpeed; }
 
+	UFUNCTION(BlueprintPure, Category="Submarine")
+	float GetThrottle() const { return Throttle; }
+
+	UFUNCTION(BlueprintPure, Category="Submarine")
+	float GetRudder() const { return Rudder; }
+
+	UFUNCTION(BlueprintPure, Category="Submarine")
+	float GetDive() const { return Dive; }
+
+	/** Server: pause the test autopilot while someone pilots by hand. Resuming starts the loop over. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Submarine")
+	void SetAutopilotSuspended(bool bSuspended) { bAutopilotSuspended = bSuspended; }
+
+	const TArray<AActor*>& GetSonarTestTargets() const { return SonarTestTargets; }
+
+	/** Water depth inside the sub, in cm above the floor */
+	UFUNCTION(BlueprintPure, Category="Submarine|Water")
+	float GetWaterLevel() const { return WaterLevel; }
+
+	UFUNCTION(BlueprintPure, Category="Submarine|Water")
+	float GetMaxWaterLevel() const { return MaxWaterLevel; }
+
+	/** World Z of the water surface inside the sub */
+	UFUNCTION(BlueprintPure, Category="Submarine|Water")
+	float GetWaterSurfaceZ() const;
+
+	UFUNCTION(BlueprintPure, Category="Submarine|Water")
+	int32 GetNumLeaks() const { return NumLeaks; }
+
+	/** How far below the surface the sub is, in cm (negative = above it) */
+	UFUNCTION(BlueprintPure, Category="Submarine|Depth")
+	float GetDepth() const { return SurfaceZ - GetActorLocation().Z; }
+
+	/** World Z of the sea surface */
+	UFUNCTION(BlueprintPure, Category="Submarine|Depth")
+	float GetSurfaceZ() const { return SurfaceZ; }
+
+	/** Distance from the hull's center to its top/bottom, in cm */
+	UFUNCTION(BlueprintPure, Category="Submarine")
+	float GetHullHalfHeight() const;
+
+	/** Server: stop the sub and ignore all steering (round over). Cleared by Reset. */
+	void SetControlsLocked(bool bLocked);
+
+	/** Server: back to the start of a round - start position, dry, no leaks, stopped */
+	virtual void Reset() override;
+
+	/** Server, debug: jump to Location/Rotation (everyone standing inside comes along), stopped */
+	void DebugTeleport(const FVector& Location, const FRotator& Rotation);
+
+	/** Server, debug: fill with water (loses the round) */
+	void DebugFlood();
+
+	/** Server, debug: spring a leak on a random wall */
+	void DebugSpawnLeak();
+
+	/** Server: where the sub started this round */
+	const FTransform& GetStartTransform() const { return StartTransform; }
+
+	/** True once the water reached MaxWaterLevel: the crew lost */
+	UFUNCTION(BlueprintPure, Category="Submarine|Water")
+	bool IsFlooded() const { return bFlooded; }
+
+	/** Server world time, estimated on clients; use it to compare against replicated server timestamps */
+	double GetServerTime() const;
+
 	/** World transform the player should spawn at */
 	UFUNCTION(BlueprintPure, Category="Submarine")
 	FTransform GetPlayerSpawnTransform() const;
@@ -151,6 +233,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	/** Throttle the sub starts with (0 = parked, 0.3 = slow cruise) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Submarine|Movement", meta=(ClampMin="-1", ClampMax="1"))
@@ -208,6 +291,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Submarine|Interior")
 	bool bUsePlaceholderInterior = true;
 
+	/** Helm console the server spawns at HelmStationPoint. Clear it to place your own. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Stations")
+	TSubclassOf<ASubStation> HelmStationClass;
+
+	/** Sonar console the server spawns at SonarStationPoint. Clear it to place your own. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Stations")
+	TSubclassOf<ASubStation> SonarStationClass;
+
 	/** Server drives the sub through TestManeuvers on a loop, so players can test walking around while it moves */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Submarine|Test")
 	bool bTestManeuvers = false;
@@ -216,9 +307,46 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Submarine|Test", meta=(TitleProperty="Label"))
 	TArray<FSubmarineTestStep> TestManeuvers;
 
+	/**
+	 * Actors that always show up on sonar (as amber blips) while within range, even if they're above/below
+	 * the ping or small enough to slip between rays. Pick any actors in the level.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Submarine|Test")
+	TArray<AActor*> SonarTestTargets;
+
 	/** Print the current test step and speed on screen, separately for server and client */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Submarine|Test")
 	bool bShowTestManeuverDebug = true;
+
+	/** Hitting something faster than this (cm/s into the surface) springs a leak */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Damage", meta=(ClampMin="0"))
+	float LeakImpactSpeed = 200.f;
+
+	/** Minimum seconds between new leaks, so one crash doesn't spawn a pile of them */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Damage", meta=(ClampMin="0"))
+	float LeakCooldown = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Damage", meta=(ClampMin="1"))
+	int32 MaxLeaks = 6;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Damage")
+	TSubclassOf<ALeak> LeakClass;
+
+	/** Water depth (cm) at which the sub counts as flooded */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Water", meta=(ClampMin="1"))
+	float MaxWaterLevel = 250.f;
+
+	/** Treat the height the sub starts at as the sea surface */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Depth")
+	bool bSurfaceAtStart = true;
+
+	/** World Z of the sea surface (used when bSurfaceAtStart is off) */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Replicated, Category="Submarine|Depth", meta=(EditCondition="!bSurfaceAtStart"))
+	float SurfaceZ = 0.f;
+
+	/** How fast water drains (cm/s) while there are no leaks */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Water", meta=(ClampMin="0"))
+	float DrainRate = 5.f;
 
 private:
 	UStaticMeshComponent* CreateInteriorPiece(const FName& Name);
@@ -234,7 +362,12 @@ private:
 	/** Client: blends a little of the remaining error to the server out each frame */
 	void ApplyCorrection(float DeltaSeconds);
 
-	double GetServerTime() const;
+	/**
+	 * Jump the sub somewhere and bring the characters inside along, keeping their place in the sub.
+	 * Needed because CharacterMovement follows a moving floor with a swept move, which gets stuck on
+	 * anything in between when the floor jumps far. Server moves everyone; clients their own character.
+	 */
+	void TeleportWithRiders(const FVector& NewLocation, const FRotator& NewRotation);
 
 	/** Server: advances the test autopilot and feeds its inputs */
 	void UpdateTestManeuvers(float DeltaSeconds);
@@ -260,6 +393,51 @@ private:
 	int32 TestStepIndex = INDEX_NONE;
 
 	float TestStepTimeLeft = 0.f;
+
+	/** Server: true while someone is at the helm */
+	bool bAutopilotSuspended = false;
+
+	/** Server: round over, steering is ignored */
+	bool bControlsLocked = false;
+
+	/** Server: where the sub started, for resetting rounds */
+	FTransform StartTransform;
+
+	/** Server: spawns a station of StationClass at Point and attaches it there */
+	void SpawnStation(TSubclassOf<ASubStation> StationClass, USceneComponent* Point);
+
+	/** Server: the stations we spawned */
+	UPROPERTY(Transient)
+	TArray<ASubStation*> SpawnedStations;
+
+	/** Server: spawn a leak on the inside wall closest to where the hull was hit */
+	void SpawnLeakFromImpact(const FHitResult& Hit);
+
+	/** Server: raise the water by every leak's flow, or drain it when there are none */
+	void UpdateWater(float DeltaSeconds);
+
+	/** Move/show the water plane to match WaterLevel */
+	void UpdateWaterSurface();
+
+	UFUNCTION()
+	void OnRep_WaterLevel();
+
+	UPROPERTY(ReplicatedUsing=OnRep_WaterLevel)
+	float WaterLevel = 0.f;
+
+	UPROPERTY(Replicated)
+	int32 NumLeaks = 0;
+
+	/** Server: open leaks */
+	UPROPERTY(Transient)
+	TArray<ALeak*> Leaks;
+
+	/** Server: world time of the last leak we spawned */
+	double LastLeakTime = -1000.0;
+
+	/** The sub filled with water: game over. Restarting comes with day 12. */
+	UPROPERTY(Replicated)
+	bool bFlooded = false;
 
 	FVector LocationError = FVector::ZeroVector;
 	float YawError = 0.f;
