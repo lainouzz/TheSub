@@ -282,6 +282,7 @@ void ATheSubProjectCharacter::StopInteract()
 {
 	if (LocalHoldTarget.IsValid())
 	{
+		bIsStationInUse = false;
 		LocalHoldTarget.Reset();
 		ServerStopInteract();
 	}

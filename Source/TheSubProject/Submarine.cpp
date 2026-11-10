@@ -3,11 +3,24 @@
 #include "Submarine.h"
 #include "HelmStation.h"
 #include "SonarStation.h"
+#include "EngineStation.h"
+#include "ElectricStation.h"
 #include "Leak.h"
+#include "HullShakeCameraModifier.h"
 #include "Materials/MaterialInterface.h"
+#include "Components/AudioComponent.h"
+#include "GameFramework/PlayerController.h"
+#include "Kismet/GameplayStatics.h"
+#include "Kismet/KismetRenderingLibrary.h"
+#include "Sound/SoundWaveProcedural.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Components/PrimitiveComponent.h"
+#include "Components/ActorComponent.h"
 #include "Components/BoxComponent.h"
+#include "Components/SceneCaptureComponent2D.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/PointLightComponent.h"
+#include "Components/SpotLightComponent.h"
 #include "Components/ArrowComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/CollisionProfile.h"
@@ -85,6 +98,45 @@ ASubmarine::ASubmarine()
 	SonarLight = CreateRoomLight(TEXT("SonarLight"));
 	EngineLight = CreateRoomLight(TEXT("EngineLight"));
 
+	NoseSpotLight = CreateDefaultSubobject<USpotLightComponent>(TEXT("NoseLight"));
+	NoseSpotLight->SetupAttachment(InteriorRoot);
+
+	HallRoofwayLight_1 = CreateRoomLight(TEXT("RoofLight 1"));
+	HallRoofwayLight_2 = CreateRoomLight(TEXT("RoofLight 2"));
+
+	HallwayRedLight_1 = CreateRoomLight(TEXT("RedLight 1"));
+	HallwayRedLight_2 = CreateRoomLight(TEXT("RedLight 2"));
+	HallwayRedLight_3 = CreateRoomLight(TEXT("RedLight 3"));
+	HallwayRedLight_4 = CreateRoomLight(TEXT("RedLight 4"));
+
+	// Plays inside the sub, so no 3D attenuation: everyone aboard hears it the same
+	AlarmAudio = CreateDefaultSubobject<UAudioComponent>(TEXT("AlarmAudio"));
+	AlarmAudio->SetupAttachment(InteriorRoot);
+	AlarmAudio->bAutoActivate = false;
+	AlarmAudio->bAllowSpatialization = false;
+
+	HelmScreenComponent = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("HelmScreenComponent"));
+	HelmScreenComponent->SetupAttachment(InteriorRoot);
+
+	HelmScreenComponent->bCaptureEveryFrame = false;
+	HelmScreenComponent->bCaptureOnMovement = false;
+
+	// Starter Content sounds, pitched down at play time: a debris thud for impacts, collapses as hull groans
+	static ConstructorHelpers::FObjectFinder<USoundBase> ImpactSoundAsset(TEXT("/Game/StarterContent/Audio/Explosion01.Explosion01"));
+	if (ImpactSoundAsset.Succeeded())
+	{
+		ImpactSound = ImpactSoundAsset.Object;
+	}
+	static ConstructorHelpers::FObjectFinder<USoundBase> Creak1(TEXT("/Game/StarterContent/Audio/Collapse01.Collapse01"));
+	static ConstructorHelpers::FObjectFinder<USoundBase> Creak2(TEXT("/Game/StarterContent/Audio/Collapse02.Collapse02"));
+	for (USoundBase* Creak : { Creak1.Object, Creak2.Object })
+	{
+		if (Creak != nullptr)
+		{
+			CreakSounds.Add(Creak);
+		}
+	}
+
 	PlayerSpawnPoint = CreateDefaultSubobject<USceneComponent>(TEXT("PlayerSpawnPoint"));
 	PlayerSpawnPoint->SetupAttachment(InteriorRoot);
 	// Middle (sonar) room, just above the floor so the character capsule (half height ~96) lands on it
@@ -97,6 +149,15 @@ ASubmarine::ASubmarine()
 	SonarStationPoint = CreateDefaultSubobject<USceneComponent>(TEXT("SonarStationPoint"));
 	SonarStationPoint->SetupAttachment(InteriorRoot);
 	SonarStationClass = ASonarStation::StaticClass();
+
+	ElectricStationPoint = CreateDefaultSubobject<USceneComponent>(TEXT("ElectricSpawnPoint"));
+	ElectricStationPoint->SetupAttachment(InteriorRoot);
+	ElectricStationClass = AElectricStation::StaticClass();
+
+	EngineStationPoint = CreateDefaultSubobject<USceneComponent>(TEXT("EngineSpawnPoint"));
+	EngineStationPoint->SetupAttachment(InteriorRoot);
+	EngineStationClass = AEngineStation::StaticClass();
+
 
 	LeakClass = ALeak::StaticClass();
 
@@ -165,7 +226,8 @@ UPointLightComponent* ASubmarine::CreateRoomLight(const FName& Name)
 	UPointLightComponent* Light = CreateDefaultSubobject<UPointLightComponent>(Name);
 	Light->SetupAttachment(InteriorRoot);
 	Light->SetMobility(EComponentMobility::Movable);
-	Light->SetIntensity(5000.f);
+	Light->SetIntensity(NormalLightIntensity);
+	Light->SetLightColor(NormalLightColor);
 	Light->SetAttenuationRadius(900.f);
 	Light->SetCastShadows(false);
 	return Light;
@@ -220,17 +282,20 @@ void ASubmarine::LayoutInterior()
 		Piece->SetCollisionEnabled(bUsePlaceholderInterior ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
 	}
 
-	const float LightZ = H - 60.f;
-	HelmLight->SetRelativeLocation(FVector(L / 3.f, 0.f, LightZ));
-	SonarLight->SetRelativeLocation(FVector(0.f, 0.f, LightZ));
-	EngineLight->SetRelativeLocation(FVector(-L / 3.f, 0.f, LightZ));
+	if (bUsePlaceholderInterior) {
+		const float LightZ = H - 60.f;
+		//Lights
+		HelmLight->SetRelativeLocation(FVector(L / 3.f, 0.f, LightZ));
+		SonarLight->SetRelativeLocation(FVector(0.f, 0.f, LightZ));
+		EngineLight->SetRelativeLocation(FVector(-L / 3.f, 0.f, LightZ));
 
-	// Console a little off the bow wall, facing forward, so the pilot stands behind it
-	HelmStationPoint->SetRelativeLocation(FVector(L * 0.5f - 100.f, 0.f, 0.f));
+		// Console a little off the bow wall, facing forward, so the pilot stands behind it
+		HelmStationPoint->SetRelativeLocation(FVector(L * 0.5f - 100.f, 0.f, 0.f));
 
-	// Console against the port (left) wall, facing it, so the operator stands in the room with their back to the middle
-	SonarStationPoint->SetRelativeLocation(FVector(0.f, -W * 0.5f + 100.f, 0.f));
-	SonarStationPoint->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
+		// Console against the port (left) wall, facing it, so the operator stands in the room with their back to the middle
+		SonarStationPoint->SetRelativeLocation(FVector(0.f, -W * 0.5f + 100.f, 0.f));
+		SonarStationPoint->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
+	}
 
 	// Hull box wraps the whole interior and is centered on it
 	HullCollision->SetBoxExtent(FVector(L * 0.5f + T, W * 0.5f + T, H * 0.5f + T));
@@ -243,6 +308,67 @@ void ASubmarine::LayoutInterior()
 void ASubmarine::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Sound and light effects only matter where someone is looking at a screen
+	if (GetNetMode() != NM_DedicatedServer)
+	{
+		BuildSiren();
+		NextCreakTime = GetWorld()->GetTimeSeconds() + FMath::FRandRange(CreakInterval.X, CreakInterval.Y);
+
+		if (HelmScreenComponent) {
+			UTextureRenderTarget2D* CameraRenderTarget =
+				UKismetRenderingLibrary::CreateRenderTarget2D(
+					this,
+					320,
+					180,
+					ETextureRenderTargetFormat::RTF_RGBA8,
+					FLinearColor::Black,
+					false,
+					false
+				);
+
+			HelmScreenComponent->HiddenActors.Add(this);
+
+			if (CameraRenderTarget)
+			{
+				HelmScreenComponent->TextureTarget = CameraRenderTarget;
+			}
+
+			TArray<UPrimitiveComponent*> PrimitiveComponents;
+			GetComponents<UPrimitiveComponent>(PrimitiveComponents);
+
+			for (UPrimitiveComponent* Components : PrimitiveComponents)
+			{
+				if (Components && Components->ComponentHasTag(FName("HelmScreen")))
+				{
+					HelmScreenMesh = Components;
+					break;
+				}
+			}
+
+			if (HelmScreenMesh)
+			{
+				UMaterialInstanceDynamic* ScreenMID = HelmScreenMesh->CreateDynamicMaterialInstance(0);
+
+				if (ScreenMID && CameraRenderTarget)
+				{
+					ScreenMID->SetTextureParameterValue(
+						FName("CameraFeed"),
+						CameraRenderTarget
+					);
+				}
+			}
+
+			GetWorldTimerManager().SetTimer(
+				CameraCaptureTimer,
+				this,
+				&ASubmarine::UpdateCameraFeed,
+				1.f / 12.f,
+				true
+			);
+			
+		}
+	}
 
 	if (HasAuthority())
 	{
@@ -257,6 +383,8 @@ void ASubmarine::BeginPlay()
 		// Stations are replicated actors attached to the sub; clients get them through replication
 		SpawnStation(HelmStationClass, HelmStationPoint);
 		SpawnStation(SonarStationClass, SonarStationPoint);
+		SpawnStation(EngineStationClass, EngineStationPoint);
+		SpawnStation(ElectricStationClass, ElectricStationPoint);
 	}
 }
 
@@ -440,11 +568,17 @@ void ASubmarine::DebugTeleport(const FVector& Location, const FRotator& Rotation
 	UE_LOG(LogSubmarine, Log, TEXT("Debug: teleported to %s (depth %.0f m)"), *Location.ToString(), GetDepth() / 100.f);
 }
 
+bool ASubmarine::IsInsideHull(const FVector& WorldLocation) const
+{
+	const FVector Local = FTransform(GetActorRotation(), GetActorLocation()).InverseTransformPosition(WorldLocation);
+	const FVector Extent = HullCollision->GetScaledBoxExtent();
+	return FMath::Abs(Local.X) <= Extent.X && FMath::Abs(Local.Y) <= Extent.Y && FMath::Abs(Local.Z) <= Extent.Z;
+}
+
 void ASubmarine::TeleportWithRiders(const FVector& NewLocation, const FRotator& NewRotation)
 {
 	// Everyone inside the hull box, standing or mid-jump, with their transform relative to the sub
 	const FTransform OldSubTransform(GetActorRotation(), GetActorLocation());
-	const FVector HullExtent = HullCollision->GetScaledBoxExtent();
 	TArray<TPair<ACharacter*, FTransform>> Riders;
 	for (TActorIterator<ACharacter> It(GetWorld()); It; ++It)
 	{
@@ -455,8 +589,7 @@ void ASubmarine::TeleportWithRiders(const FVector& NewLocation, const FRotator& 
 			continue;
 		}
 
-		const FVector Local = OldSubTransform.InverseTransformPosition(Character->GetActorLocation());
-		if (FMath::Abs(Local.X) <= HullExtent.X && FMath::Abs(Local.Y) <= HullExtent.Y && FMath::Abs(Local.Z) <= HullExtent.Z)
+		if (IsInsideHull(Character->GetActorLocation()))
 		{
 			Riders.Emplace(Character, Character->GetActorTransform().GetRelativeTransform(OldSubTransform));
 		}
@@ -536,6 +669,8 @@ void ASubmarine::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 		Leaks.Reset();
 	}
+
+	GetWorldTimerManager().ClearTimer(CameraCaptureTimer);
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -618,6 +753,141 @@ void ASubmarine::Tick(float DeltaSeconds)
 	{
 		ShowTestManeuverDebug();
 	}
+
+	if (GetNetMode() != NM_DedicatedServer)
+	{
+		UpdateJuice(DeltaSeconds);
+	}
+}
+
+void ASubmarine::UpdateJuice(float DeltaSeconds)
+{
+	// Alarm: red pulsing lights and the siren while water is coming in (or it's already too late)
+	const bool bWantAlarm = NumLeaks > 0 || bFlooded;
+	if (bWantAlarm != bAlarmOn)
+	{
+		bAlarmOn = bWantAlarm;
+		AlarmTime = 0.f;
+		if (bAlarmOn)
+		{
+			AlarmAudio->SetVolumeMultiplier(SirenVolume);
+			AlarmAudio->Play();
+		}
+		else
+		{
+			AlarmAudio->Stop();
+		}
+	}
+
+	FLinearColor LightColor = NormalLightColor;
+	float LightIntensity = NormalLightIntensity;
+	if (bAlarmOn)
+	{
+		AlarmTime += DeltaSeconds;
+		const float Pulse = 0.5f + 0.5f * FMath::Sin(2.f * UE_PI * AlarmPulseRate * AlarmTime);
+		LightColor = FLinearColor::Red;
+		LightIntensity = FMath::Lerp(AlarmLightIntensity * 0.1f, AlarmLightIntensity, Pulse);
+	}
+	for (UPointLightComponent* Light : { HelmLight, SonarLight, EngineLight })
+	{
+		Light->SetLightColor(LightColor);
+		Light->SetIntensity(LightIntensity);
+	}
+
+	// Creaks: the deeper, the louder. Each machine rolls its own timing; it's only atmosphere.
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (Now >= NextCreakTime)
+	{
+		NextCreakTime = Now + FMath::FRandRange(CreakInterval.X, CreakInterval.Y);
+
+		const float Depth = GetDepth();
+		if (Depth >= CreakStartDepth && CreakSounds.Num() > 0)
+		{
+			const float Deepness = FMath::Clamp((Depth - CreakStartDepth) / FMath::Max(CreakFullDepth - CreakStartDepth, 1.f), 0.f, 1.f);
+			const FVector Where = InteriorRoot->GetComponentTransform().TransformPosition(
+				FVector(FMath::FRandRange(-0.5f, 0.5f) * InteriorSize.X, FMath::RandBool() ? InteriorSize.Y * 0.5f : -InteriorSize.Y * 0.5f, InteriorSize.Z * 0.7f));
+
+			UGameplayStatics::PlaySoundAtLocation(this, CreakSounds[FMath::RandRange(0, CreakSounds.Num() - 1)], Where,
+				FMath::Lerp(0.25f, 0.9f, Deepness), FMath::FRandRange(0.35f, 0.55f));
+			ShakeLocalRiders(FMath::Lerp(0.1f, 0.5f, Deepness));
+		}
+	}
+}
+
+void ASubmarine::MulticastHullImpact_Implementation(float ImpactSpeed, FVector_NetQuantize Location)
+{
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	// 0 = barely a bump, 1 = hard enough to spring a leak with room to spare
+	const float Strength = FMath::Clamp((ImpactSpeed - MinImpactSpeed) / FMath::Max(LeakImpactSpeed * 1.5f - MinImpactSpeed, 1.f), 0.f, 1.f);
+	PlayImpactFeedback(Strength, Location);
+}
+
+void ASubmarine::PlayImpactFeedback(float Strength, const FVector& Location)
+{
+	if (ImpactSound != nullptr)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, Location, FMath::Lerp(0.3f, 1.f, Strength), FMath::Lerp(0.6f, 0.4f, Strength));
+	}
+	ShakeLocalRiders(FMath::Lerp(0.5f, 4.f, Strength));
+}
+
+void ASubmarine::ShakeLocalRiders(float Strength) const
+{
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PlayerController = It->Get();
+		if (PlayerController != nullptr && PlayerController->IsLocalController()
+			&& PlayerController->GetPawn() != nullptr && IsInsideHull(PlayerController->GetPawn()->GetActorLocation()))
+		{
+			UHullShakeCameraModifier::Shake(PlayerController, Strength);
+		}
+	}
+}
+
+void ASubmarine::BuildSiren()
+{
+	// A two-tone wail sweeping 450 <-> 1100 Hz. The average pitch (775 Hz) times the period (1.6 s) is
+	// a whole number of cycles, so the loop joins up without a click.
+	constexpr int32 SampleRate = 22050;
+	constexpr float Period = 1.6f;
+	constexpr float BaseFrequency = 775.f;
+	constexpr float Sweep = 325.f;
+	const int32 NumSamples = FMath::RoundToInt(SampleRate * Period);
+
+	SirenPcm = MakeShared<TArray<uint8>>();
+	SirenPcm->SetNumUninitialized(NumSamples * sizeof(int16));
+	int16* Samples = reinterpret_cast<int16*>(SirenPcm->GetData());
+
+	double Phase = 0.0;
+	for (int32 Index = 0; Index < NumSamples; ++Index)
+	{
+		const double T = static_cast<double>(Index) / SampleRate;
+		const double Frequency = BaseFrequency - Sweep * FMath::Cos(2.0 * UE_DOUBLE_PI * T / Period);
+		Phase += 2.0 * UE_DOUBLE_PI * Frequency / SampleRate;
+
+		// A bit of second harmonic makes it sound like a speaker instead of a test tone
+		const double Value = 0.8 * FMath::Sin(Phase) + 0.2 * FMath::Sin(2.0 * Phase);
+		Samples[Index] = static_cast<int16>(FMath::Clamp(Value, -1.0, 1.0) * 0.6 * MAX_int16);
+	}
+
+	SirenWave = NewObject<USoundWaveProcedural>(this, TEXT("SirenWave"));
+	SirenWave->SetSampleRate(SampleRate);
+	SirenWave->NumChannels = 1;
+	SirenWave->Duration = 10000.f; // INDEFINITELY_LOOPING_DURATION
+	SirenWave->bLooping = false;
+
+	// Called from the audio thread whenever it runs low; the buffer is never modified, so sharing it is safe
+	TSharedPtr<TArray<uint8>> Pcm = SirenPcm;
+	SirenWave->OnSoundWaveProceduralUnderflow.BindLambda([Pcm](USoundWaveProcedural* Wave, int32 SamplesRequired)
+	{
+		Wave->QueueAudio(Pcm->GetData(), Pcm->Num());
+	});
+
+	AlarmAudio->SetSound(SirenWave);
 }
 
 void ASubmarine::UpdateTestManeuvers(float DeltaSeconds)
@@ -675,6 +945,19 @@ void ASubmarine::UpdateRates(float DeltaSeconds, float& Speed, float& TurnRate, 
 	DiveSpeed = FMath::FInterpTo(DiveSpeed, Dive * MaxDiveSpeed, DeltaSeconds, DiveResponse);
 }
 
+void ASubmarine::UpdateCameraFeed()
+{
+	if (!HelmScreenComponent || !HelmScreenMesh)
+		return;
+
+	if (!HelmScreenMesh->WasRecentlyRendered(0.2f))
+	{
+		return;
+	}
+
+	HelmScreenComponent->CaptureScene();
+}
+
 void ASubmarine::MoveHull(float DeltaSeconds)
 {
 	// Yaw only: keeping the deck level makes walking around inside comfortable.
@@ -709,11 +992,6 @@ void ASubmarine::MoveHull(float DeltaSeconds)
 	FHitResult Hit;
 	AddActorWorldOffset(Delta, true, &Hit);
 
-	// Started the move already sunk into something (e.g. resting on the seabed, or a client correction
-	// nudged us in). The engine only lets moves through that head out of the overlap, so a level move
-	// along the ground would be blocked forever. Push out first, then try again.
-	// Only small overlaps get pushed out: a deep one means something is sitting inside the hull box,
-	// and if it rides along with us, pushing out every frame launches the sub.
 	if (Hit.bStartPenetrating && Hit.PenetrationDepth > SubmarineInterior::MaxDepenetration)
 	{
 		UE_LOG(LogSubmarine, Warning, TEXT("[%s] Hull is %.0f cm inside %s (%s); not pushing out. Does it need NoCollision?"),
@@ -751,6 +1029,7 @@ void ASubmarine::MoveHull(float DeltaSeconds)
 		if (HasAuthority() && IntoSurface >= MinImpactSpeed)
 		{
 			OnHullImpact.Broadcast(IntoSurface, Hit);
+			MulticastHullImpact(IntoSurface, Hit.ImpactPoint);
 
 			if (IntoSurface >= LeakImpactSpeed)
 			{
@@ -777,8 +1056,8 @@ void ASubmarine::OnRep_MoveState()
 	float Speed = MoveState.Speed;
 	float TurnRate = MoveState.TurnRate;
 	float DiveSpeed = MoveState.DiveSpeed;
-	FVector Location = MoveState.Location;
 	float Yaw = MoveState.Yaw;
+	FVector Location = MoveState.Location;
 
 	float Remaining = FMath::Clamp(static_cast<float>(GetServerTime() - MoveState.ServerTime), 0.f, SubmarineInterior::MaxExtrapolationTime);
 	while (Remaining > UE_KINDA_SMALL_NUMBER)

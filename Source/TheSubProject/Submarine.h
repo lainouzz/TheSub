@@ -4,14 +4,21 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "TimerManager.h"
 #include "Submarine.generated.h"
 
 class UBoxComponent;
 class UStaticMeshComponent;
+class UPrimitiveComponent;
 class UPointLightComponent;
+class USpotLightComponent;
 class UArrowComponent;
 class ASubStation;
 class ALeak;
+class UAudioComponent;
+class USoundBase;
+class USoundWaveProcedural;
+class USceneCaptureComponent2D;
 
 THESUBPROJECT_API DECLARE_LOG_CATEGORY_EXTERN(LogSubmarine, Log, All);
 
@@ -97,6 +104,9 @@ class THESUBPROJECT_API ASubmarine : public AActor
 	/** Optional hull mesh (assign your own submarine mesh in a Blueprint child) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
 	UStaticMeshComponent* HullMesh;
+	
+	UPROPERTY(Transient)
+	TObjectPtr<UPrimitiveComponent> HelmScreenMesh;
 
 	/** Greybox floor, ceiling, outer walls and room dividers, sized by InteriorSize */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
@@ -111,6 +121,31 @@ class THESUBPROJECT_API ASubmarine : public AActor
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
 	UPointLightComponent* EngineLight;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Submarine, meta = (AllowPrivateAccess = "true"))
+	UPointLightComponent* HallRoofwayLight_1;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Submarine, meta = (AllowPrivateAccess = "true"))
+	UPointLightComponent* HallRoofwayLight_2;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Submarine, meta = (AllowPrivateAccess = "true"))
+	UPointLightComponent* HallwayRedLight_1;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Submarine, meta = (AllowPrivateAccess = "true"))
+	UPointLightComponent* HallwayRedLight_2;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Submarine, meta = (AllowPrivateAccess = "true"))
+	UPointLightComponent* HallwayRedLight_3;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Submarine, meta = (AllowPrivateAccess = "true"))
+	UPointLightComponent* HallwayRedLight_4;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Submarine, meta = (AllowPrivateAccess = "true"))
+	USpotLightComponent* NoseSpotLight;
+
+	/** Siren that wails while there are leaks */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
+	UAudioComponent* AlarmAudio;
+
 	/** Where players spawn inside the sub (move it in the Blueprint/viewport) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
 	USceneComponent* PlayerSpawnPoint;
@@ -123,6 +158,12 @@ class THESUBPROJECT_API ASubmarine : public AActor
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
 	USceneComponent* SonarStationPoint;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
+	USceneComponent* ElectricStationPoint;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta = (AllowPrivateAccess = "true"))
+	USceneComponent* EngineStationPoint;
+
 	/** Water surface inside the sub; sits at WaterLevel above the floor, hidden when dry */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Submarine, meta=(AllowPrivateAccess = "true"))
 	UStaticMeshComponent* WaterSurface;
@@ -130,6 +171,9 @@ class THESUBPROJECT_API ASubmarine : public AActor
 	/** Shows which way is forward in the editor */
 	UPROPERTY(VisibleAnywhere, Category=Submarine, meta=(AllowPrivateAccess = "true"))
 	UArrowComponent* ForwardArrow;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Submarine, meta = (allowPrivateAccess = "true"))
+	USceneCaptureComponent2D* HelmScreenComponent;
 
 public:
 	ASubmarine();
@@ -299,6 +343,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Stations")
 	TSubclassOf<ASubStation> SonarStationClass;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Submarine|Stations")
+	TSubclassOf<ASubStation> ElectricStationClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Submarine|Stations")
+	TSubclassOf<ASubStation> EngineStationClass;
+
 	/** Server drives the sub through TestManeuvers on a loop, so players can test walking around while it moves */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Submarine|Test")
 	bool bTestManeuvers = false;
@@ -348,6 +398,44 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Water", meta=(ClampMin="0"))
 	float DrainRate = 5.f;
 
+	/** Room lights normally: dim and warm */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice")
+	FLinearColor NormalLightColor = FLinearColor(1.f, 0.8f, 0.6f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice", meta=(ClampMin="0"))
+	float NormalLightIntensity = 1500.f;
+
+	/** Peak of the red pulse while there are leaks */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice", meta=(ClampMin="0"))
+	float AlarmLightIntensity = 4000.f;
+
+	/** Red pulses per second */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice", meta=(ClampMin="0.1"))
+	float AlarmPulseRate = 1.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice", meta=(ClampMin="0", ClampMax="2"))
+	float SirenVolume = 0.3f;
+
+	/** Thud played on hull impacts */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice")
+	USoundBase* ImpactSound;
+
+	/** Groans played at random while deep; one is picked each time */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice")
+	TArray<USoundBase*> CreakSounds;
+
+	/** Depth (cm) where the hull starts creaking */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice", meta=(ClampMin="0"))
+	float CreakStartDepth = 2000.f;
+
+	/** Depth (cm) where creaks are at full volume */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice", meta=(ClampMin="0"))
+	float CreakFullDepth = 20000.f;
+
+	/** Random seconds between creaks */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Submarine|Juice")
+	FVector2D CreakInterval = FVector2D(6.f, 15.f);
+
 private:
 	UStaticMeshComponent* CreateInteriorPiece(const FName& Name);
 	UPointLightComponent* CreateRoomLight(const FName& Name);
@@ -355,6 +443,8 @@ private:
 
 	/** Eases speed / turn rate / dive speed toward the current inputs */
 	void UpdateRates(float DeltaSeconds, float& Speed, float& TurnRate, float& DiveSpeed) const;
+
+	void UpdateCameraFeed();
 
 	/** Moves the hull one step, sliding along and slowing down on anything it hits */
 	void MoveHull(float DeltaSeconds);
@@ -368,6 +458,35 @@ private:
 	 * anything in between when the floor jumps far. Server moves everyone; clients their own character.
 	 */
 	void TeleportWithRiders(const FVector& NewLocation, const FRotator& NewRotation);
+
+	/** Is WorldLocation inside the hull box? */
+	bool IsInsideHull(const FVector& WorldLocation) const;
+
+	/** Cosmetics on every machine with a screen: alarm lights and siren, creaks at depth */
+	void UpdateJuice(float DeltaSeconds);
+
+	/** Thud + camera shake for everyone inside; Strength 0..1 */
+	void PlayImpactFeedback(float Strength, const FVector& Location);
+
+	/** Shake the camera of every local player standing inside the sub */
+	void ShakeLocalRiders(float Strength) const;
+
+	/** Builds the looping siren sound (generated in code, no asset needed) */
+	void BuildSiren();
+
+	/** Server -> everyone: the hull hit something at ImpactSpeed (cm/s into the surface) */
+	UFUNCTION(NetMulticast, Unreliable)
+	void MulticastHullImpact(float ImpactSpeed, FVector_NetQuantize Location);
+
+	UPROPERTY(Transient)
+	USoundWaveProcedural* SirenWave;
+
+	/** One loop of siren audio (16-bit mono PCM), shared with the audio thread */
+	TSharedPtr<TArray<uint8>> SirenPcm;
+
+	bool bAlarmOn = false;
+	float AlarmTime = 0.f;
+	double NextCreakTime = 0.0;
 
 	/** Server: advances the test autopilot and feeds its inputs */
 	void UpdateTestManeuvers(float DeltaSeconds);
@@ -442,4 +561,10 @@ private:
 	FVector LocationError = FVector::ZeroVector;
 	float YawError = 0.f;
 	bool bHasReceivedMoveState = false;
+
+	FTimerHandle CameraCaptureTimer;
+
+	// TEMP debug: how many timer ticks captured vs skipped (screen not visible). Remove after testing.
+	int32 DebugCaptureCount = 0;
+	int32 DebugSkipCount = 0;
 };
